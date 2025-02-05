@@ -2,10 +2,6 @@ import { Context, Schema, Session } from 'koishi'
 
 export const name = 'chemistry-exam'
 
-export interface Config {}
-
-export const Config: Schema<Config> = Schema.object({})
-
 // 定义化学式类型
 interface ChemicalFormula {
     formula: string
@@ -57,113 +53,85 @@ const FORMULAS: ChemicalFormula[] = [
     { formula: "HCN", mass: 27 },       // 氰化氢
 ];
 
-// 用户答题状态接口
-interface UserState {
-    currentQuestion: ChemicalFormula
-    correctCount: number
-    startTime: number
-    totalQuestions: number
+export interface Config {
+    timeout?: number
+    precision?: number
 }
 
-export function apply(ctx: Context) {
-    // 使用 Map 存储用户状态
-    const userStates = new Map<string, UserState>()
+export const Config: Schema<Config> = Schema.object({
+    timeout: Schema.number().default(300000).description('回答超时时间（毫秒）'),
+    precision: Schema.number().default(0.01).description('允许的误差范围')
+})
 
-    // 注册刷题命令
+export function apply(ctx: Context, config: Config) {
     ctx.command('刷化学')
         .alias('chemistry')
-        .action(({ session }) => {
-            const key = getSessionKey(session)
+        .action(async ({ session }) => {
+            // 状态变量
+            let correctCount = 0
+            let totalQuestions = 0
+            const startTime = Date.now()
 
-            // 检查是否已在答题
-            if (userStates.has(key)) {
-                return '您已经在答题中，请输入答案或发送“退出”结束当前练习。'
+            try {
+                while (true) {
+                    const question = FORMULAS[Math.floor(Math.random() * FORMULAS.length)]
+                    totalQuestions++
+
+                    // 发送题目并等待回答
+                    await session.send(`题目 #${totalQuestions}：请计算 ${question.formula} 的相对分子质量\n（输入数字或“退出”）`);
+                    const answer = await session.prompt(config.timeout);
+
+                    // 处理超时
+                    if (answer === '超时') {
+                        await session.send('⏰ 回答超时，练习自动结束')
+                        break
+                    }
+
+                    // 处理退出指令
+                    if (answer === '退出') {
+                        await session.send('🛑 已主动结束练习')
+                        break
+                    }
+
+                    // 验证数字输入
+                    const parsed = parseFloat(answer)
+                    if (isNaN(parsed)) {
+                        await session.send('⚠️ 请输入有效数字或发送“退出”')
+                        totalQuestions-- // 不统计无效输入
+                        continue
+                    }
+
+                    // 验证答案
+                    if (Math.abs(parsed - question.mass) < config.precision) {
+                        correctCount++
+                        await session.send(`✅ 正确！连续正确次数：${correctCount}`)
+                    } else {
+                        await session.send(`❌ 错误！正确答案是 ${question.mass}`)
+                        break
+                    }
+                }
+            } finally {
+                // 生成统计信息
+                const duration = Date.now() - startTime
+                const accuracy = totalQuestions > 0
+                    ? (correctCount / totalQuestions * 100).toFixed(1)
+                    : '0.0'
+
+                await session.send([
+                    '📊 练习统计',
+                    `├ 总题数：${totalQuestions}`,
+                    `├ 正确数：${correctCount}`,
+                    `├ 正确率：${accuracy}%`,
+                    `└ 用时：${formatTime(duration)}`
+                ].join('\n'))
             }
-
-            // 初始化题目
-            const question = getRandomFormula()
-            userStates.set(key, {
-                currentQuestion: question,
-                correctCount: 0,
-                startTime: Date.now(),
-                totalQuestions: 1,
-            })
-
-            return `题目 #1：请计算 ${question.formula} 的相对分子质量（输入数字或“退出”）`
         })
+}
 
-    // 中间件处理用户输入
-    ctx.middleware(async (session, next) => {
-        const key = getSessionKey(session)
-        const state = userStates.get(key)
-        if (!state) return next()
-
-        const input = session.content.trim()
-
-        // 处理退出指令
-        if (input === '退出') {
-            const result = generateResultMessage(state, true)
-            userStates.delete(key)
-            return result
-        }
-
-        // 验证数字输入
-        const answer = parseFloat(input)
-        if (isNaN(answer)) {
-            return '请输入有效的数字或发送“退出”结束练习'
-        }
-
-        // 验证答案（允许±0.01的误差）
-        const isCorrect = Math.abs(answer - state.currentQuestion.mass) < 0.01
-        state.totalQuestions++
-
-        // 回答正确
-        if (isCorrect) {
-            state.correctCount++
-            const nextQuestion = getRandomFormula()
-            state.currentQuestion = nextQuestion
-
-            return [
-                `✅ 正确！当前连续正确：${state.correctCount}`,
-                `题目 #${state.totalQuestions}：请计算 ${nextQuestion.formula} 的相对分子质量`,
-            ].join('\n')
-        }
-
-        // 回答错误
-        const result = generateResultMessage(state, false)
-        userStates.delete(key)
-        return result
-    })
-
-    // 获取会话唯一标识
-    function getSessionKey(session: Session) {
-        return `${session.userId}:${session.channelId}`
-    }
-
-    // 随机获取化学式
-    function getRandomFormula(): ChemicalFormula {
-        return FORMULAS[Math.floor(Math.random() * FORMULAS.length)]
-    }
-
-    // 生成结果消息
-    function generateResultMessage(state: UserState, isManualExit: boolean) {
-        const timeUsed = Date.now() - state.startTime
-        const accuracy = (state.correctCount / (state.totalQuestions - 1)) * 100
-
-        return [
-            isManualExit ? '🛑 已主动结束练习' : '❌ 回答错误，练习结束',
-            `├ 累计答题：${state.totalQuestions - 1} 道`,
-            `├ 正确数量：${state.correctCount} 道`,
-            `├ 正确率：${accuracy.toFixed(1)}%`,
-            `└ 用时：${formatTime(timeUsed)}`,
-        ].join('\n')
-    }
-
-    // 格式化时间
-    function formatTime(ms: number) {
-        const seconds = Math.floor(ms / 1000)
-        const minutes = Math.floor(seconds / 60)
-        const remainingSeconds = seconds % 60
-        return `${minutes}分${remainingSeconds.toString().padStart(2, '0')}秒`
-    }
+// 格式化时间显示
+function formatTime(ms: number) {
+    const totalSeconds = Math.floor(ms / 1000)
+    const minutes = Math.floor(totalSeconds / 60)
+    const seconds = totalSeconds % 60
+    return `${minutes}分${seconds.toString().padStart(2, '0')}秒`
 }
