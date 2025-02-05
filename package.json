@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-chemistry-exam",
   "description": "刷题（化学模式）",
-  "version": "0.0.1",
+  "version": "0.0.3",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
